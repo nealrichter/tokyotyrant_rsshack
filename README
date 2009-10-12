@@ -1,0 +1,57 @@
+Neal's quick hack at Memory management inside Tokyo Cabinet
+
+Essentially I added:
+ * rssgoal parameter as peer of lcnode/ncnode
+ * uses libproc to get RSS memory size
+ * change to tcbdbcacheadjust() to proportionally adjust down leafc
+and nodec
+ * if actual memory usage is 10% higher than the goal via standard
+methods in tcbdbcacheadjust()
+
+  Example usage w/ 2.3 Gig:
+#nmemb=256#ncnum=10240#lmemb=512#lcnum=65536#bnum=100000000#xmsiz=536870912#rssgoal=2300000000#opts=l
+
+ Still in testing.  Results inconclusive due to repeated server
+crashes .. I attempted to substitute this version of tc for a current
+older running version.  That might cause crashes. 
+
+This is a work-in-progress so the build modification are not integrated into 'configure' inputs.
+
+Build instructions
+1) wget http://1978th.net/tokyocabinet/tokyocabinet-1.4.34.tar.gz
+2) wget http://1978th.net/tokyotyrant/tokyotyrant-1.1.35.tar.gz
+3) locate proc/readproc.h 
+    - if it doesn't exist install it
+    - standard headers for libproc.so
+4) tar xvfz both tarballs
+5) apply the patch to tokyocabinet-1.4.34
+   patch -p0 < tc_1_4_34_rss_management.patch
+6) configure and make as normal - will error on link
+7) make -f Makefile.TC.libproc
+8) configure and make tokyotyrant as normal - will error on link
+9) make -f Makefile.TT.libproc
+10) Install ttserver_rsshack, libtokyotyrant_rsshack.so.3 & libtokyocabinet_rsshack.so.8 in the normal places
+11) ldd libtokyocabinet_rsshack.so.8
+	libbz2.so.1 => /usr/lib64/libbz2.so.1 (0x00002ba0f91f9000)
+	libz.so.1 => /usr/lib64/libz.so.1 (0x00002ba0f9409000)
+	librt.so.1 => /lib64/librt.so.1 (0x00002ba0f961d000)
+	libpthread.so.0 => /lib64/libpthread.so.0 (0x00002ba0f9827000)
+	libm.so.6 => /lib64/libm.so.6 (0x00002ba0f9a41000)
+	libc.so.6 => /lib64/libc.so.6 (0x00002ba0f9cc4000)
+	libproc-3.2.7.so => /lib64/libproc-3.2.7.so (0x00002ba0fa013000)
+	/lib64/ld-linux-x86-64.so.2 (0x0000555555554000)
+12) ldd ttserver_rsshack 
+	libtokyotyrant_rsshack.so.3 => /usr/local/lib/libtokyotyrant_rsshack.so.3 (0x00002ab055cd6000)
+	libtokyocabinet_rsshack.so.8 => /usr/local/lib/libtokyocabinet_rsshack.so.8 (0x00002ab055eed000)
+	libbz2.so.1 => /usr/lib64/libbz2.so.1 (0x00002ab05616c000)
+	libz.so.1 => /usr/lib64/libz.so.1 (0x00002ab05637d000)
+	libresolv.so.2 => /lib64/libresolv.so.2 (0x00002ab056591000)
+	libnsl.so.1 => /lib64/libnsl.so.1 (0x00002ab0567a6000)
+	libdl.so.2 => /lib64/libdl.so.2 (0x00002ab0569be000)
+	librt.so.1 => /lib64/librt.so.1 (0x00002ab056bc2000)
+	libpthread.so.0 => /lib64/libpthread.so.0 (0x00002ab056dcb000)
+	libm.so.6 => /lib64/libm.so.6 (0x00002ab056fe6000)
+	libc.so.6 => /lib64/libc.so.6 (0x00002ab057269000)
+	libproc-3.2.7.so => /lib64/libproc-3.2.7.so (0x00002ab0575b7000)
+	/lib64/ld-linux-x86-64.so.2 (0x00002ab055abb000)
+
