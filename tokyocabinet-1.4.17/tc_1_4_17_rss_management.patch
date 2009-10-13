@@ -1,0 +1,414 @@
+Common subdirectories: tokyocabinet-1.4.17/bros and tokyocabinet-1.4.17-neal/bros
+Common subdirectories: tokyocabinet-1.4.17/doc and tokyocabinet-1.4.17-neal/doc
+Common subdirectories: tokyocabinet-1.4.17/example and tokyocabinet-1.4.17-neal/example
+Common subdirectories: tokyocabinet-1.4.17/lab and tokyocabinet-1.4.17-neal/lab
+Only in tokyocabinet-1.4.17-neal: Makefile.TC.libproc
+Common subdirectories: tokyocabinet-1.4.17/man and tokyocabinet-1.4.17-neal/man
+Only in tokyocabinet-1.4.17-neal: .svn
+diff -up tokyocabinet-1.4.17/tcadb.c tokyocabinet-1.4.17-neal/tcadb.c
+--- tokyocabinet-1.4.17/tcadb.c	2009-04-24 05:00:34.000000000 -0600
++++ tokyocabinet-1.4.17-neal/tcadb.c	2009-10-12 13:53:26.000000000 -0600
+@@ -107,6 +107,7 @@ bool tcadbopen(TCADB *adb, const char *n
+   int32_t nmemb = -1;
+   int32_t lcnum = -1;
+   int32_t ncnum = -1;
++  int32_t rssgoal = -1;
+   int32_t width = -1;
+   int64_t limsiz = -1;
+   TCLIST *idxs = NULL;
+@@ -147,6 +148,8 @@ bool tcadbopen(TCADB *adb, const char *n
+       nmemb = tcatoix(pv);
+     } else if(!tcstricmp(elem, "lcnum")){
+       lcnum = tcatoix(pv);
++    } else if(!tcstricmp(elem, "rssgoal")){
++      rssgoal = tcatoix(pv);
+     } else if(!tcstricmp(elem, "ncnum")){
+       ncnum = tcatoix(pv);
+     } else if(!tcstricmp(elem, "width")){
+@@ -204,7 +207,7 @@ bool tcadbopen(TCADB *adb, const char *n
+     if(tbmode) opts |= BDBTBZIP;
+     if(ttmode) opts |= BDBTTCBS;
+     tcbdbtune(bdb, lmemb, nmemb, bnum, apow, fpow, opts);
+-    tcbdbsetcache(bdb, lcnum, ncnum);
++    tcbdbsetcache(bdb, lcnum, ncnum, rssgoal);
+     if(xmsiz >= 0) tcbdbsetxmsiz(bdb, xmsiz);
+     if(capnum > 0) tcbdbsetcapnum(bdb, capnum);
+     int omode = owmode ? BDBOWRITER : BDBOREADER;
+diff -up tokyocabinet-1.4.17/tcbdb.c tokyocabinet-1.4.17-neal/tcbdb.c
+--- tokyocabinet-1.4.17/tcbdb.c	2009-04-24 05:00:34.000000000 -0600
++++ tokyocabinet-1.4.17-neal/tcbdb.c	2009-10-12 13:53:40.000000000 -0600
+@@ -25,6 +25,8 @@
+ #define BDBNODEIDBASE  ((1LL<<48)+1)     // base number of node ID
+ #define BDBLEVELMAX    64                // max level of B+ tree
+ #define BDBCACHEOUT    8                 // number of pages in a process of cacheout
++#define RSSUNLIMITED   INT_MAX           // rss management - unlimited memory
++#define RSSMINIMUM     8388608           // rss management - minimum memory size 8MB
+ 
+ #define BDBDEFLMEMB    128               // default number of members in each leaf
+ #define BDBMINLMEMB    4                 // minimum number of members in each leaf
+@@ -270,7 +272,7 @@ bool tcbdbtune(TCBDB *bdb, int32_t lmemb
+ 
+ 
+ /* Set the caching parameters of a B+ tree database object. */
+-bool tcbdbsetcache(TCBDB *bdb, int32_t lcnum, int32_t ncnum){
++bool tcbdbsetcache(TCBDB *bdb, int32_t lcnum, int32_t ncnum, int32_t rssgoal){
+   assert(bdb);
+   if(bdb->open){
+     tcbdbsetecode(bdb, TCEINVALID, __FILE__, __LINE__, __func__);
+@@ -278,6 +280,7 @@ bool tcbdbsetcache(TCBDB *bdb, int32_t l
+   }
+   if(lcnum > 0) bdb->lcnum = tclmax(lcnum, BDBLEVELMAX);
+   if(ncnum > 0) bdb->ncnum = tclmax(ncnum, BDBLEVELMAX);
++  if(rssgoal > 0) bdb->rssgoal = tclmax(tclmin(rssgoal, RSSUNLIMITED), RSSMINIMUM);
+   return true;
+ }
+ 
+@@ -486,7 +489,7 @@ void *tcbdbget(TCBDB *bdb, const void *k
+   } else {
+     rv = NULL;
+   }
+-  bool adj = TCMAPRNUM(bdb->leafc) > bdb->lcnum || TCMAPRNUM(bdb->nodec) > bdb->ncnum;
++  bool adj = TCLEAFC_OVERBUDGET(bdb) || TCNODEC_OVERBUDGET(bdb) || TCRSS_OVERBUDGET(bdb);
+   BDBUNLOCKMETHOD(bdb);
+   if(adj && BDBLOCKMETHOD(bdb, true)){
+     if(!bdb->tran && !tcbdbcacheadjust(bdb)){
+@@ -517,7 +520,7 @@ const void *tcbdbget3(TCBDB *bdb, const 
+     return NULL;
+   }
+   const char *rv = tcbdbgetimpl(bdb, kbuf, ksiz, sp);
+-  bool adj = TCMAPRNUM(bdb->leafc) > bdb->lcnum || TCMAPRNUM(bdb->nodec) > bdb->ncnum;
++  bool adj = TCLEAFC_OVERBUDGET(bdb) || TCNODEC_OVERBUDGET(bdb) || TCRSS_OVERBUDGET(bdb);
+   BDBUNLOCKMETHOD(bdb);
+   if(adj && BDBLOCKMETHOD(bdb, true)){
+     if(!bdb->tran && !tcbdbcacheadjust(bdb)) rv = NULL;
+@@ -537,7 +540,7 @@ TCLIST *tcbdbget4(TCBDB *bdb, const void
+     return NULL;
+   }
+   TCLIST *rv = tcbdbgetlist(bdb, kbuf, ksiz);
+-  bool adj = TCMAPRNUM(bdb->leafc) > bdb->lcnum || TCMAPRNUM(bdb->nodec) > bdb->ncnum;
++  bool adj = TCLEAFC_OVERBUDGET(bdb) || TCNODEC_OVERBUDGET(bdb) || TCRSS_OVERBUDGET(bdb);
+   BDBUNLOCKMETHOD(bdb);
+   if(adj && BDBLOCKMETHOD(bdb, true)){
+     if(!bdb->tran && !tcbdbcacheadjust(bdb)){
+@@ -560,7 +563,7 @@ int tcbdbvnum(TCBDB *bdb, const void *kb
+     return 0;
+   }
+   int rv = tcbdbgetnum(bdb, kbuf, ksiz);
+-  bool adj = TCMAPRNUM(bdb->leafc) > bdb->lcnum || TCMAPRNUM(bdb->nodec) > bdb->ncnum;
++  bool adj = TCLEAFC_OVERBUDGET(bdb) || TCNODEC_OVERBUDGET(bdb) || TCRSS_OVERBUDGET(bdb);
+   BDBUNLOCKMETHOD(bdb);
+   if(adj && BDBLOCKMETHOD(bdb, true)){
+     if(!bdb->tran && !tcbdbcacheadjust(bdb)) rv = 0;
+@@ -605,7 +608,7 @@ TCLIST *tcbdbrange(TCBDB *bdb, const voi
+     return keys;
+   }
+   tcbdbrangeimpl(bdb, bkbuf, bksiz, binc, ekbuf, eksiz, einc, max, keys);
+-  bool adj = TCMAPRNUM(bdb->leafc) > bdb->lcnum || TCMAPRNUM(bdb->nodec) > bdb->ncnum;
++  bool adj = TCLEAFC_OVERBUDGET(bdb) || TCNODEC_OVERBUDGET(bdb) || TCRSS_OVERBUDGET(bdb);
+   BDBUNLOCKMETHOD(bdb);
+   if(adj && BDBLOCKMETHOD(bdb, true)){
+     tcbdbcacheadjust(bdb);
+@@ -635,7 +638,7 @@ TCLIST *tcbdbfwmkeys(TCBDB *bdb, const v
+     return keys;
+   }
+   tcbdbrangefwm(bdb, pbuf, psiz, max, keys);
+-  bool adj = TCMAPRNUM(bdb->leafc) > bdb->lcnum || TCMAPRNUM(bdb->nodec) > bdb->ncnum;
++  bool adj = TCLEAFC_OVERBUDGET(bdb) || TCNODEC_OVERBUDGET(bdb) || TCRSS_OVERBUDGET(bdb);
+   BDBUNLOCKMETHOD(bdb);
+   if(adj && BDBLOCKMETHOD(bdb, true)){
+     tcbdbcacheadjust(bdb);
+@@ -962,7 +965,7 @@ bool tcbdbcurfirst(BDBCUR *cur){
+     return false;
+   }
+   bool rv = tcbdbcurfirstimpl(cur);
+-  bool adj = TCMAPRNUM(bdb->leafc) > bdb->lcnum || TCMAPRNUM(bdb->nodec) > bdb->ncnum;
++  bool adj = TCLEAFC_OVERBUDGET(bdb) || TCNODEC_OVERBUDGET(bdb) || TCRSS_OVERBUDGET(bdb);
+   BDBUNLOCKMETHOD(bdb);
+   if(adj && BDBLOCKMETHOD(bdb, true)){
+     if(!bdb->tran && !tcbdbcacheadjust(bdb)) rv = false;
+@@ -983,7 +986,7 @@ bool tcbdbcurlast(BDBCUR *cur){
+     return false;
+   }
+   bool rv = tcbdbcurlastimpl(cur);
+-  bool adj = TCMAPRNUM(bdb->leafc) > bdb->lcnum || TCMAPRNUM(bdb->nodec) > bdb->ncnum;
++  bool adj = TCLEAFC_OVERBUDGET(bdb) || TCNODEC_OVERBUDGET(bdb) || TCRSS_OVERBUDGET(bdb);
+   BDBUNLOCKMETHOD(bdb);
+   if(adj && BDBLOCKMETHOD(bdb, true)){
+     if(!bdb->tran && !tcbdbcacheadjust(bdb)) rv = false;
+@@ -1004,7 +1007,7 @@ bool tcbdbcurjump(BDBCUR *cur, const voi
+     return false;
+   }
+   bool rv = tcbdbcurjumpimpl(cur, kbuf, ksiz, true);
+-  bool adj = TCMAPRNUM(bdb->leafc) > bdb->lcnum || TCMAPRNUM(bdb->nodec) > bdb->ncnum;
++  bool adj = TCLEAFC_OVERBUDGET(bdb) || TCNODEC_OVERBUDGET(bdb) || TCRSS_OVERBUDGET(bdb);
+   BDBUNLOCKMETHOD(bdb);
+   if(adj && BDBLOCKMETHOD(bdb, true)){
+     if(!bdb->tran && !tcbdbcacheadjust(bdb)) rv = false;
+@@ -1037,7 +1040,7 @@ bool tcbdbcurprev(BDBCUR *cur){
+     return false;
+   }
+   bool rv = tcbdbcurprevimpl(cur);
+-  bool adj = TCMAPRNUM(bdb->leafc) > bdb->lcnum || TCMAPRNUM(bdb->nodec) > bdb->ncnum;
++  bool adj = TCLEAFC_OVERBUDGET(bdb) || TCNODEC_OVERBUDGET(bdb) || TCRSS_OVERBUDGET(bdb);
+   BDBUNLOCKMETHOD(bdb);
+   if(adj && BDBLOCKMETHOD(bdb, true)){
+     if(!bdb->tran && !tcbdbcacheadjust(bdb)) rv = false;
+@@ -1063,7 +1066,7 @@ bool tcbdbcurnext(BDBCUR *cur){
+     return false;
+   }
+   bool rv = tcbdbcurnextimpl(cur);
+-  bool adj = TCMAPRNUM(bdb->leafc) > bdb->lcnum || TCMAPRNUM(bdb->nodec) > bdb->ncnum;
++  bool adj = TCLEAFC_OVERBUDGET(bdb) || TCNODEC_OVERBUDGET(bdb) || TCRSS_OVERBUDGET(bdb);
+   BDBUNLOCKMETHOD(bdb);
+   if(adj && BDBLOCKMETHOD(bdb, true)){
+     if(!bdb->tran && !tcbdbcacheadjust(bdb)) rv = false;
+@@ -2825,7 +2828,19 @@ static bool tcbdbcacheadjust(TCBDB *bdb)
+     bool clk = BDBLOCKCACHE(bdb);
+     TCMAP *leafc = bdb->leafc;
+     tcmapiterinit(leafc);
+-    int dnum = tclmax(TCMAPRNUM(bdb->leafc) - bdb->lcnum, BDBCACHEOUT);
++
++    uint32_t tmp_leafc = TCMAPRNUM(bdb->leafc);
++    uint32_t rssnow = tcgetprocrss();
++    uint32_t lcdiff = tmp_leafc - bdb->lcnum;
++
++    float rssgoalratio = (rssnow/bdb->rssgoal);
++    uint32_t rsslcdiff = 0;
++
++    if((bdb->rssgoal > 1) && ( rssgoalratio > 1.10))
++        rsslcdiff = (int)((rssgoalratio - 1) * tmp_leafc);
++
++    int dnum = tclmax(tclmax(lcdiff, rsslcdiff), BDBCACHEOUT);
++
+     for(int i = 0; i < dnum; i++){
+       int rsiz;
+       if(!tcbdbleafcacheout(bdb, (BDBLEAF *)tcmapiterval(tcmapiternext(leafc, &rsiz), &rsiz)))
+@@ -2838,7 +2853,19 @@ static bool tcbdbcacheadjust(TCBDB *bdb)
+     bool clk = BDBLOCKCACHE(bdb);
+     TCMAP *nodec = bdb->nodec;
+     tcmapiterinit(nodec);
+-    int dnum = tclmax(TCMAPRNUM(bdb->nodec) - bdb->ncnum, BDBCACHEOUT);
++
++    uint32_t tmp_nodec = TCMAPRNUM(bdb->nodec);
++    uint32_t rssnow = tcgetprocrss();
++    uint32_t ncdiff = tmp_nodec - bdb->ncnum;
++
++    float rssgoalratio = (rssnow/bdb->rssgoal);
++    uint32_t rssncdiff = 0;
++
++    if((bdb->rssgoal > 1) && ( rssgoalratio > 1.10))
++        rssncdiff = (int)((rssgoalratio - 1) * tmp_nodec);
++
++    int dnum = tclmax(tclmax(ncdiff, rssncdiff), BDBCACHEOUT);
++
+     for(int i = 0; i < dnum; i++){
+       int rsiz;
+       if(!tcbdbnodecacheout(bdb, (BDBNODE *)tcmapiterval(tcmapiternext(nodec, &rsiz), &rsiz)))
+@@ -3394,7 +3421,7 @@ static bool tcbdboptimizeimpl(TCBDB *bdb
+   if(fpow < 0) fpow = tclog2l(tchdbfbpmax(bdb->hdb));
+   if(opts == UINT8_MAX) opts = bdb->opts;
+   tcbdbtune(tbdb, lmemb, nmemb, bnum, apow, fpow, opts);
+-  tcbdbsetcache(tbdb, 1, 1);
++  tcbdbsetcache(tbdb, 1, 1, 1);
+   tcbdbsetlsmax(tbdb, bdb->lsmax);
+   uint32_t lcnum = bdb->lcnum;
+   uint32_t ncnum = bdb->ncnum;
+@@ -4035,6 +4062,7 @@ void tcbdbprintmeta(TCBDB *bdb){
+   wp += sprintf(wp, " cmpop=%p", (void *)bdb->cmpop);
+   wp += sprintf(wp, " lcnum=%u", bdb->lcnum);
+   wp += sprintf(wp, " ncnum=%u", bdb->ncnum);
++  wp += sprintf(wp, " rssgoal=%u", bdb->rssgoal);
+   wp += sprintf(wp, " lsmax=%u", bdb->lsmax);
+   wp += sprintf(wp, " lschk=%u", bdb->lschk);
+   wp += sprintf(wp, " capnum=%llu", (unsigned long long)bdb->capnum);
+diff -up tokyocabinet-1.4.17/tcbdb.h tokyocabinet-1.4.17-neal/tcbdb.h
+--- tokyocabinet-1.4.17/tcbdb.h	2009-04-24 05:00:34.000000000 -0600
++++ tokyocabinet-1.4.17-neal/tcbdb.h	2009-10-12 13:53:41.000000000 -0600
+@@ -65,6 +65,7 @@ typedef struct {                        
+   void *cmpop;                           /* opaque object for the comparison function */
+   uint32_t lcnum;                        /* maximum number of cached leaves */
+   uint32_t ncnum;                        /* maximum number of cached nodes */
++  uint32_t rssgoal;                      /* desired rss size */
+   uint32_t lsmax;                        /* maximum size of each leaf */
+   uint32_t lschk;                        /* counter for leaf size checking */
+   uint64_t capnum;                       /* capacity number of records */
+@@ -212,7 +213,7 @@ bool tcbdbtune(TCBDB *bdb, int32_t lmemb
+    the default value is specified.  The default value is 512.
+    If successful, the return value is true, else, it is false.
+    Note that the caching parameters should be set before the database is opened. */
+-bool tcbdbsetcache(TCBDB *bdb, int32_t lcnum, int32_t ncnum);
++bool tcbdbsetcache(TCBDB *bdb, int32_t lcnum, int32_t ncnum, int32_t rssgoal);
+ 
+ 
+ /* Set the size of the extra mapped memory of a B+ tree database object.
+diff -up tokyocabinet-1.4.17/tcbtest.c tokyocabinet-1.4.17-neal/tcbtest.c
+--- tokyocabinet-1.4.17/tcbtest.c	2009-04-24 05:00:34.000000000 -0600
++++ tokyocabinet-1.4.17-neal/tcbtest.c	2009-10-12 13:53:49.000000000 -0600
+@@ -758,7 +758,7 @@ static int procwrite(const char *path, i
+     eprint(bdb, "tcbdbtune");
+     err = true;
+   }
+-  if(!tcbdbsetcache(bdb, lcnum, ncnum)){
++  if(!tcbdbsetcache(bdb, lcnum, ncnum, 0)){
+     eprint(bdb, "tcbdbsetcache");
+     err = true;
+   }
+@@ -842,7 +842,7 @@ static int procread(const char *path, bo
+     eprint(bdb, "tcbdbsetcodecfunc");
+     err = true;
+   }
+-  if(!tcbdbsetcache(bdb, lcnum, ncnum)){
++  if(!tcbdbsetcache(bdb, lcnum, ncnum, 0)){
+     eprint(bdb, "tcbdbsetcache");
+     err = true;
+   }
+@@ -931,7 +931,7 @@ static int procremove(const char *path, 
+     eprint(bdb, "tcbdbsetcodecfunc");
+     err = true;
+   }
+-  if(!tcbdbsetcache(bdb, lcnum, ncnum)){
++  if(!tcbdbsetcache(bdb, lcnum, ncnum, 0)){
+     eprint(bdb, "tcbdbsetcache");
+     err = true;
+   }
+@@ -1017,7 +1017,7 @@ static int procrcat(const char *path, in
+     eprint(bdb, "tcbdbtune");
+     err = true;
+   }
+-  if(!tcbdbsetcache(bdb, lcnum, ncnum)){
++  if(!tcbdbsetcache(bdb, lcnum, ncnum, 0)){
+     eprint(bdb, "tcbdbsetcache");
+     err = true;
+   }
+@@ -1205,7 +1205,7 @@ static int procqueue(const char *path, i
+     eprint(bdb, "tcbdbtune");
+     err = true;
+   }
+-  if(!tcbdbsetcache(bdb, lcnum, ncnum)){
++  if(!tcbdbsetcache(bdb, lcnum, ncnum, 0)){
+     eprint(bdb, "tcbdbsetcache");
+     err = true;
+   }
+@@ -1321,7 +1321,7 @@ static int procmisc(const char *path, in
+     eprint(bdb, "tcbdbtune");
+     err = true;
+   }
+-  if(!tcbdbsetcache(bdb, 128, 256)){
++  if(!tcbdbsetcache(bdb, 128, 256, 0)){
+     eprint(bdb, "tcbdbsetcache");
+     err = true;
+   }
+@@ -2133,7 +2133,7 @@ static int procwicked(const char *path, 
+     eprint(bdb, "tcbdbtune");
+     err = true;
+   }
+-  if(!tcbdbsetcache(bdb, 128, 256)){
++  if(!tcbdbsetcache(bdb, 128, 256, 0)){
+     eprint(bdb, "tcbdbsetcache");
+     err = true;
+   }
+diff -up tokyocabinet-1.4.17/tctdb.c tokyocabinet-1.4.17-neal/tctdb.c
+--- tokyocabinet-1.4.17/tctdb.c	2009-04-24 05:00:35.000000000 -0600
++++ tokyocabinet-1.4.17-neal/tctdb.c	2009-10-12 13:54:03.000000000 -0600
+@@ -1337,7 +1337,7 @@ static bool tctdbopenimpl(TCTDB *tdb, co
+       TCBDB *bdb = tcbdbnew();
+       if(tdb->mmtx) tcbdbsetmutex(bdb);
+       if(enc && dec) tcbdbsetcodecfunc(bdb, enc, encop, dec, decop);
+-      tcbdbsetcache(bdb, tdb->lcnum, tdb->ncnum);
++      tcbdbsetcache(bdb, tdb->lcnum, tdb->ncnum, 0);
+       tcbdbsetlsmax(bdb, TDBIDXLSMAX);
+       if(tcbdbopen(bdb, ipath, bomode)){
+         idxs[inum].name = tcstrdup(name);
+@@ -1881,7 +1881,7 @@ static bool tctdbsetindeximpl(TCTDB *tdb
+     if(tdb->mmtx) tcbdbsetmutex(idx->db);
+     if(enc && dec) tcbdbsetcodecfunc(idx->db, enc, encop, dec, decop);
+     tcbdbtune(idx->db, TDBIDXLMEMB, TDBIDXNMEMB, bbnum, -1, -1, bopts);
+-    tcbdbsetcache(idx->db, tdb->lcnum, tdb->ncnum);
++    tcbdbsetcache(idx->db, tdb->lcnum, tdb->ncnum, 0);
+     tcbdbsetlsmax(idx->db, TDBIDXLSMAX);
+     if(!tcbdbopen(idx->db, TCXSTRPTR(pbuf), bomode)){
+       tctdbsetecode(tdb, tcbdbecode(idx->db), __FILE__, __LINE__, __func__);
+@@ -1897,7 +1897,7 @@ static bool tctdbsetindeximpl(TCTDB *tdb
+     tcbdbsetcmpfunc(idx->db, tccmpdecimal, NULL);
+     if(enc && dec) tcbdbsetcodecfunc(idx->db, enc, encop, dec, decop);
+     tcbdbtune(idx->db, TDBIDXLMEMB, TDBIDXNMEMB, bbnum, -1, -1, bopts);
+-    tcbdbsetcache(idx->db, tdb->lcnum, tdb->ncnum);
++    tcbdbsetcache(idx->db, tdb->lcnum, tdb->ncnum, 0);
+     tcbdbsetlsmax(idx->db, TDBIDXLSMAX);
+     if(!tcbdbopen(idx->db, TCXSTRPTR(pbuf), bomode)){
+       tctdbsetecode(tdb, tcbdbecode(idx->db), __FILE__, __LINE__, __func__);
+diff -up tokyocabinet-1.4.17/tcutil.c tokyocabinet-1.4.17-neal/tcutil.c
+--- tokyocabinet-1.4.17/tcutil.c	2009-04-24 05:00:35.000000000 -0600
++++ tokyocabinet-1.4.17-neal/tcutil.c	2009-10-12 13:54:17.000000000 -0600
+@@ -13,7 +13,7 @@
+  * Boston, MA 02111-1307 USA.
+  *************************************************************************************************/
+ 
+-
++#include <proc/readproc.h>
+ #include "tcutil.h"
+ #include "myconf.h"
+ #include "md5.h"
+@@ -87,6 +87,34 @@ void tcfree(void *ptr){
+   TCFREE(ptr);
+ }
+ 
++/* NEAL:  get RSS process memory size */
++uint32_t tcgetprocrss()
++{
++  pid_t my_pid = -1;
++  proc_t my_proc;
++  my_pid = getpgrp();
++  get_proc_stats(my_pid, &my_proc);
++  
++  return my_proc.rss;
++}
++
++bool tcrssoverbudget(uint32_t rssgoal)
++{
++  pid_t my_pid = -1;
++  proc_t my_proc;
++  my_pid = getpgrp();
++  get_proc_stats(my_pid, &my_proc);
++
++  if((my_proc.rss > 0) && (rssgoal > 1))
++  {
++     float rssgoalratio = (my_proc.rss/rssgoal);
++     if(( rssgoalratio > 1.10))
++        return true;
++  }
++
++  return false;
++}
++
+ 
+ 
+ /*************************************************************************************************
+diff -up tokyocabinet-1.4.17/tcutil.h tokyocabinet-1.4.17-neal/tcutil.h
+--- tokyocabinet-1.4.17/tcutil.h	2009-04-24 05:00:35.000000000 -0600
++++ tokyocabinet-1.4.17-neal/tcutil.h	2009-10-12 13:54:18.000000000 -0600
+@@ -107,6 +107,14 @@ char *tcstrdup(const void *str);
+ void tcfree(void *ptr);
+ 
+ 
++/*************************************************************************************************
++ * Neal's changes
++ *************************************************************************************************/
++
++/* NEAL:  get RSS process memory size */
++uint32_t tcgetprocrss();
++bool tcrssoverbudget(uint32_t rssgoal);
++
+ 
+ /*************************************************************************************************
+  * basic utilities (for experts)
+@@ -3495,6 +3503,9 @@ uint64_t tcpagealign(uint64_t off);
+   } while(false);
+ #endif
+ 
++#define  TCNODEC_OVERBUDGET(DBP) (((DBP->nodec)->rnum) > DBP->ncnum)
++#define  TCLEAFC_OVERBUDGET(DBP) (((DBP->leafc)->rnum) > DBP->lcnum)
++#define  TCRSS_OVERBUDGET(DBP) tcrssoverbudget(DBP->rssgoal)
+ 
+ /* Print hexadecimal pattern of a binary region. */
+ #define TCPRINTHEX(TC_ptr, TC_size) \
