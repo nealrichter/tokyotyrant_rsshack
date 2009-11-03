@@ -55,3 +55,5 @@ Build instructions
 	libproc-3.2.7.so => /lib64/libproc-3.2.7.so (0x00002ab0575b7000)
 	/lib64/ld-linux-x86-64.so.2 (0x00002ab055abb000)
 
+It should be trivial to extract the code/functions from libproc to remove the dependency on librproc.  libproc's get_proc_stats() 
+reads and parses the /proc/[PID] file to fill a proc_t struct.  This would be a bit cleaner...
